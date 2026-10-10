@@ -1,0 +1,26 @@
+{
+  "name": "opencode-finish-notification",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Powiadomienie ntfy po zakończeniu pracy modelu OpenCode (temat sesji + folder roboczy)",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "finish.js",
+    "core.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ntfy",
+    "notification",
+    "finish"
+  ],
+  "license": "MIT"
+}
