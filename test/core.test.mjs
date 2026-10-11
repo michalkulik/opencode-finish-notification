@@ -4,7 +4,9 @@ import { test } from "node:test"
 import {
   DEFAULTS,
   assistantText,
+  buildFormNotification,
   buildNotification,
+  buildPermissionNotification,
   excerpt,
   normalizeOptions,
   notificationKey,
@@ -93,6 +95,67 @@ test("buildNotification: brak tytułu schodzi do nazwy folderu", () => {
     cfg: normalizeOptions(),
   })
   assert.equal(payload.title, "opencode-finish-notification")
+})
+
+test("buildFormNotification: pytanie zawiera treść, warianty i folder", () => {
+  const payload = buildFormNotification({
+    session: { id: "ses_q", title: "Wybór podejścia", location: { directory: "/root/sources/projekt" } },
+    form: {
+      id: "frm_1",
+      sessionID: "ses_q",
+      title: "Które podejście wybierasz?",
+      metadata: { kind: "question" },
+      fields: [{ key: "choice", type: "string", title: "Wybór", options: [{ value: "a", label: "Wariant A" }, { value: "b", label: "Wariant B" }] }],
+    },
+    kind: "question",
+    cfg: normalizeOptions(),
+  })
+  assert.equal(payload.title, "Wybór podejścia")
+  assert.match(payload.message, /Pytanie do użytkownika/)
+  assert.match(payload.message, /Które podejście wybierasz\?/)
+  assert.match(payload.message, /Warianty: Wariant A \/ Wariant B/)
+  assert.match(payload.message, /Folder: \/root\/sources\/projekt/)
+  assert.match(payload.message, /Sesja: ses_q/)
+  assert.deepEqual(payload.tags, ["question"])
+  assert.equal(payload.priority, 4)
+})
+
+test("buildFormNotification: formularz nie-pytanie ma inny nagłówek i tagi", () => {
+  const payload = buildFormNotification({
+    session: { id: "ses_f", location: { directory: "/tmp/x" } },
+    form: { id: "frm_2", sessionID: "ses_f", title: "Połącz konto", metadata: { kind: "integration" }, fields: [] },
+    kind: "integration",
+    cfg: normalizeOptions(),
+  })
+  assert.match(payload.message, /Formularz od modelu/)
+  assert.deepEqual(payload.tags, ["clipboard"])
+})
+
+test("buildPermissionNotification: opisuje akcję i zasoby", () => {
+  const payload = buildPermissionNotification({
+    session: { id: "ses_p", title: "Refaktor", location: { directory: "/tmp/y" } },
+    request: { id: "per_1", sessionID: "ses_p", action: "edit", resources: ["/tmp/y/a.ts", "/tmp/y/b.ts"] },
+    cfg: normalizeOptions(),
+  })
+  assert.equal(payload.title, "Refaktor")
+  assert.match(payload.message, /Prośba o zgodę/)
+  assert.match(payload.message, /edit/)
+  assert.match(payload.message, /• \/tmp\/y\/a\.ts/)
+  assert.deepEqual(payload.tags, ["lock"])
+})
+
+test("buduje powiadomienie z folderu zdarzenia, gdy brak sesji", () => {
+  const payload = buildFormNotification({ session: undefined, form: { title: "Pytanie?" }, kind: "question", directory: "/tmp/zevent", cfg: normalizeOptions() })
+  assert.match(payload.message, /Folder: \/tmp\/zevent/)
+  assert.equal(payload.title, "zevent")
+})
+
+test("normalizeOptions: opcje pytań/formularzy", () => {
+  const cfg = normalizeOptions({ notifyOnQuestion: false, notifyOnForms: true, notifyOnPermission: true, questionPriority: 5 })
+  assert.equal(cfg.notifyOnQuestion, false)
+  assert.equal(cfg.notifyOnForms, true)
+  assert.equal(cfg.notifyOnPermission, true)
+  assert.equal(cfg.questionPriority, 5)
 })
 
 test("buildNotification: błąd ma inny tag, priorytet i opis błędu", () => {

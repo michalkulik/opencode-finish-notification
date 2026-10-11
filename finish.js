@@ -8,7 +8,14 @@
 // Ten plik nie importuje `@opencode/plugin` — lokalny katalog pluginu nie ma
 // `node_modules`, a loader OpenCode przyjmuje zwykły obiekt `{ id, setup }`.
 
-import { assistantText, buildNotification, normalizeOptions, notificationKey } from "./core.js"
+import {
+  assistantText,
+  buildFormNotification,
+  buildNotification,
+  buildPermissionNotification,
+  normalizeOptions,
+  notificationKey,
+} from "./core.js"
 
 const PREFIX = "[finish-notification]"
 
@@ -85,7 +92,6 @@ export default {
     // to samo zdarzenie. Pamiętamy ostatnio powiadomiony klucz na sesję —
     // w pamięci i w trwałym magazynie pluginu (chroni też przed restartem).
     const lastSeen = new Map()
-    const inflight = new Set()
 
     const alreadySent = async (sessionID, key) => {
       if (lastSeen.get(sessionID) === key) return true
@@ -108,62 +114,108 @@ export default {
     }
 
     const report = async (sessionID, outcome, error) => {
-      if (inflight.has(sessionID)) return
-      inflight.add(sessionID)
+      let session
       try {
-        let session
-        try {
-          session = await ctx.session.get({ sessionID })
-        } catch (err) {
-          warn(`sesja ${sessionID}: nie mogę odczytać metadanych (${err?.message ?? err})`)
-          return
-        }
-        if (!session) return
-        if (!cfg.includeSubagents && session.parentID) return
-
-        let lastAssistant
-        try {
-          const messages = await ctx.session.context({ sessionID })
-          lastAssistant = [...messages].reverse().find((message) => message.type === "assistant")
-        } catch {
-          // brak historii nie blokuje powiadomienia
-        }
-
-        const key = notificationKey(lastAssistant, session.time?.idle)
-        if (await alreadySent(sessionID, key)) return
-
-        const payload = buildNotification({
-          session,
-          outcome,
-          error,
-          summary: lastAssistant ? assistantText(lastAssistant) : "",
-          cfg,
-        })
-
-        try {
-          await publish(payload)
-          await remember(sessionID, key)
-          log(`sesja ${sessionID}: powiadomiono (${outcome}) — ${payload.title}`)
-        } catch (err) {
-          warn(`sesja ${sessionID}: powiadomienie nieudane (${err?.message ?? err})`)
-        }
-      } finally {
-        inflight.delete(sessionID)
+        session = await ctx.session.get({ sessionID })
+      } catch (err) {
+        warn(`sesja ${sessionID}: nie mogę odczytać metadanych (${err?.message ?? err})`)
+        return
       }
+      if (!session) return
+      if (!cfg.includeSubagents && session.parentID) return
+
+      let lastAssistant
+      try {
+        const messages = await ctx.session.context({ sessionID })
+        lastAssistant = [...messages].reverse().find((message) => message.type === "assistant")
+      } catch {
+        // brak historii nie blokuje powiadomienia
+      }
+
+      const key = notificationKey(lastAssistant, session.time?.idle)
+      if (await alreadySent(sessionID, key)) return
+
+      const payload = buildNotification({
+        session,
+        outcome,
+        error,
+        summary: lastAssistant ? assistantText(lastAssistant) : "",
+        cfg,
+      })
+      await send(sessionID, key, payload)
+    }
+
+    const send = async (sessionID, key, payload) => {
+      try {
+        await publish(payload)
+        await remember(sessionID, key)
+        log(`sesja ${sessionID}: powiadomiono — ${payload.title}`)
+      } catch (err) {
+        warn(`sesja ${sessionID}: powiadomienie nieudane (${err?.message ?? err})`)
+      }
+    }
+
+    // Wspólny odczyt sesji i publikacja dla powiadomień o pytaniach/zgodach.
+    const deliver = async (sessionID, key, build) => {
+      if (!sessionID) return
+      if (await alreadySent(sessionID, key)) return
+      let session
+      try {
+        session = await ctx.session.get({ sessionID })
+      } catch (err) {
+        warn(`sesja ${sessionID}: nie mogę odczytać metadanych (${err?.message ?? err})`)
+        return
+      }
+      if (!session) return
+      if (!cfg.includeSubagents && session.parentID) return
+      const payload = build(session)
+      if (payload) await send(sessionID, key, payload)
+    }
+
+    // Model prosi użytkownika o decyzję przez formularz (tool „question”).
+    const reportForm = async (event, data) => {
+      const form = data.form ?? data
+      const sessionID = typeof form?.sessionID === "string" ? form.sessionID : undefined
+      const kind = form?.metadata?.kind
+      if (kind === "question") {
+        if (!cfg.notifyOnQuestion) return
+      } else if (!cfg.notifyOnForms) {
+        return
+      }
+      const key = `form:${form?.id ?? sessionID}`
+      await deliver(sessionID, key, (session) =>
+        buildFormNotification({ session, form, kind, directory: event?.location?.directory, cfg }),
+      )
+    }
+
+    // OpenCode prosi użytkownika o zgodę na operację (narzędzie / zasób).
+    const reportPermission = async (event, data) => {
+      const request = data.request ?? data
+      const sessionID = typeof request?.sessionID === "string" ? request.sessionID : undefined
+      const key = `permission:${request?.id ?? sessionID ?? "?"}`
+      await deliver(sessionID, key, (session) =>
+        buildPermissionNotification({ session, request, directory: event?.location?.directory, cfg }),
+      )
     }
 
     const handle = async (event) => {
       const data = event?.data
-      if (!data || typeof data.sessionID !== "string") return
+      if (!data || typeof data !== "object") return
       // Deduplikacja jeszcze przed jakimkolwiek `await` — inaczej równoległe
       // instancje zdążą wysłać powiadomienie zanim zobaczą wpis drugiej.
       if (!claim(event)) return
       switch (event.type) {
         case "session.execution.succeeded":
-          await report(data.sessionID, "succeeded", data.error)
+          if (typeof data.sessionID === "string") await report(data.sessionID, "succeeded", data.error)
           break
         case "session.execution.failed":
-          if (cfg.notifyOnFailure) await report(data.sessionID, "failed", data.error)
+          if (cfg.notifyOnFailure && typeof data.sessionID === "string") await report(data.sessionID, "failed", data.error)
+          break
+        case "form.created":
+          await reportForm(event, data)
+          break
+        case "permission.asked":
+          if (cfg.notifyOnPermission) await reportPermission(event, data)
           break
         default:
           break
@@ -181,7 +233,9 @@ export default {
       }
     })()
 
-    log(`aktywny (temat: ${cfg.ntfyTopic || "—"}, błędy: ${cfg.notifyOnFailure ? "tak" : "nie"})`)
+    log(
+      `aktywny (temat: ${cfg.ntfyTopic || "—"}, błędy: ${cfg.notifyOnFailure ? "tak" : "nie"}, pytania: ${cfg.notifyOnQuestion ? "tak" : "nie"})`,
+    )
 
     return () => controller.abort()
   },

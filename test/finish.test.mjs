@@ -167,6 +167,113 @@ test("kolejne zakończenie w tej samej sesji powiadamia ponownie", async () => {
   }
 })
 
+test("wtyczka powiadamia o pytaniu do użytkownika (form.created, kind=question)", async () => {
+  delete globalThis.__opencodeFinishNotification
+  const h = makeHarness({
+    session: { id: "ses_q2", title: "Decyzja", location: { directory: "/tmp/q" } },
+  })
+  let stop
+  try {
+    stop = await finish.setup(h.ctx)
+    h.emit({
+      id: "evt_q",
+      type: "form.created",
+      location: { directory: "/tmp/q" },
+      data: {
+        form: {
+          id: "frm_q",
+          sessionID: "ses_q2",
+          title: "Które podejście?",
+          metadata: { kind: "question" },
+          fields: [{ key: "c", type: "string", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }],
+        },
+      },
+    })
+    await waitFor(() => h.published.length > 0)
+    assert.equal(h.published.length, 1)
+    assert.deepEqual(h.published[0].body.tags, ["question"])
+    assert.match(h.published[0].body.message, /Które podejście\?/)
+    assert.match(h.published[0].body.message, /Warianty: A \/ B/)
+  } finally {
+    stop?.()
+    h.restore()
+  }
+})
+
+test("formularz nie-pytanie jest domyślnie pomijany", async () => {
+  delete globalThis.__opencodeFinishNotification
+  const event = {
+    id: "evt_int",
+    type: "form.created",
+    data: { form: { id: "frm_int", sessionID: "ses_int", title: "Połącz", metadata: { kind: "integration" }, fields: [] } },
+  }
+  const h = makeHarness({ session: { id: "ses_int", location: { directory: "/tmp/i" } } })
+  let stop
+  try {
+    stop = await finish.setup(h.ctx)
+    h.emit(event)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(h.published.length, 0)
+  } finally {
+    stop?.()
+    h.restore()
+  }
+})
+
+test("permission.asked powiadamia tylko po włączeniu opcji", async () => {
+  delete globalThis.__opencodeFinishNotification
+  const event = {
+    id: "evt_per",
+    type: "permission.asked",
+    data: { request: { id: "per_1", sessionID: "ses_per", action: "bash", resources: ["rm -rf /tmp/x"] } },
+  }
+  const off = makeHarness({ session: { id: "ses_per", title: "Sprzątanie", location: { directory: "/tmp/p" } } })
+  let stopOff
+  try {
+    stopOff = await finish.setup(off.ctx)
+    off.emit(event)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(off.published.length, 0)
+  } finally {
+    stopOff?.()
+    off.restore()
+  }
+
+  const on = makeHarness({ options: { notifyOnPermission: true }, session: { id: "ses_per", title: "Sprzątanie", location: { directory: "/tmp/p" } } })
+  let stopOn
+  try {
+    stopOn = await finish.setup(on.ctx)
+    on.emit({ ...event, id: "evt_per_2" })
+    await waitFor(() => on.published.length > 0)
+    assert.deepEqual(on.published[0].body.tags, ["lock"])
+    assert.match(on.published[0].body.message, /bash/)
+  } finally {
+    stopOn?.()
+    on.restore()
+  }
+})
+
+test("pytanie nie mnoży się przez liczbę instancji", async () => {
+  delete globalThis.__opencodeFinishNotification
+  const event = {
+    id: "evt_qmulti",
+    type: "form.created",
+    data: { form: { id: "frm_m", sessionID: "ses_qm", title: "Pytanie?", metadata: { kind: "question" }, fields: [] } },
+  }
+  const session = { id: "ses_qm", title: "Wiele instancji", location: { directory: "/tmp/qm" } }
+  const instances = Array.from({ length: 5 }, () => makeHarness({ session }))
+  const stops = []
+  try {
+    for (const h of instances) stops.push(await finish.setup(h.ctx))
+    for (const h of instances) h.emit(event)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    assert.equal(instances.reduce((sum, h) => sum + h.published.length, 0), 1)
+  } finally {
+    for (const stop of stops) stop()
+    for (const h of instances) h.restore()
+  }
+})
+
 test("wtyczka powiadamia o błędzie tylko, gdy włączone", async () => {
   const failedEvent = { id: "evt_fail", type: "session.execution.failed", data: { sessionID: "ses_4", error: { type: "provider.quota" } } }
   const disabled = makeHarness({
